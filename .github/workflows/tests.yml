@@ -1,0 +1,91 @@
+name: Test
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+jobs:
+  docker:
+    strategy:
+      matrix:
+        image:
+#          - 7.0-alpine
+#          - 7.0-stretch
+          - 7.1-alpine
+          - 7.1-buster
+#          - 7.2-alpine
+#          - 7.3-alpine
+#          - 7.4-alpine
+#          - 8.0-alpine
+#          - 8.1-alpine
+#          - 8.2-alpine
+#          - 8.2-bullseye
+        library-version:
+#          - 3.4.14
+#          - 3.5.9
+#          - 3.6.4
+          - 3.7.1
+    name: Test with ${{ matrix.image }} (lib v${{ matrix.library-version }})
+    runs-on: ubuntu-latest
+    container: php:${{ matrix.image }}
+    steps:
+      - name: Install Alpine packages
+        if: contains(matrix.image, 'alpine')
+        run: |
+          apk update
+          apk upgrade
+          apk add $PHPIZE_DEPS maven automake libtool openjdk8
+      - name: Install Debian packages
+        if: "!contains(matrix.image, 'alpine')"
+        run: |
+          mkdir -p /usr/share/man/man1
+          echo 'path-exclude /usr/share/doc/*' >>/etc/dpkg/dpkg.cfg.d/excludes
+          echo 'path-exclude /usr/share/man/*' >>/etc/dpkg/dpkg.cfg.d/excludes
+          apt-get update -q
+          apt-get upgrade -qy
+          mkdir -p /usr/share/man/man1 && apt-get install -qy --no-install-recommends maven automake libtool default-jdk-headless
+      - name: Download libzookeeper source code
+        run: curl -f -o /tmp/apache-zookeeper.tgz https://archive.apache.org/dist/zookeeper/zookeeper-${{ matrix.library-version }}/apache-zookeeper-${{ matrix.library-version }}.tar.gz
+      - name: Decompress libzookeeper source code
+        run: tar -C /tmp -xz -f /tmp/apache-zookeeper.tgz
+      - name: Run Maven
+        run: |
+          cd /tmp/apache-zookeeper-*
+          mvn -pl zookeeper-jute compile
+          cd - >/dev/null
+      - name: Compile C Client
+        run: |
+          cd /tmp/apache-zookeeper-*/zookeeper-client/zookeeper-client-c
+          autoreconf -if
+          ./configure --without-cppunit
+          make -j$(nproc) CFLAGS='-Wno-stringop-truncation -Wno-format-overflow'
+          make install
+          cd - >/dev/null
+      - name: Checkout
+        uses: actions/checkout@v2 # v3 doesn't work: Error relocating /__e/node16_alpine/bin/node: getentropy: symbol not found
+        with:
+          fetch-depth: 1
+      - name: Create PECL package
+        run: pecl package
+      - name: Install PECL package
+        run: |
+          cd /tmp
+          MAKE="make -j$(nproc)" pecl install $GITHUB_WORKSPACE/zookeeper-*.tgz
+          docker-php-ext-enable zookeeper
+          cd -- $GITHUB_WORKSPACE
+      - name: Inspect package
+        run: php --ri zookeeper
+      - name: Check for PHP startup warnings
+        run: |
+          php -d display_errors=stderr -d display_startup_errors=1 -d error_reporting=-1 -r ';' 2>/tmp/php-zookeeper-warnings
+          if [ -s /tmp/php-zookeeper-warnings ]; then
+            echo 'The PHP extension was successfully installed, but PHP raised these warnings:' >&2
+            cat /tmp/php-zookeeper-warnings >&2
+            exit 1
+          fi
+          rm /tmp/php-zookeeper-warnings
+          echo "PHP didn't raise any warnings at startup."
